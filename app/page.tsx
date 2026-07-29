@@ -1,13 +1,14 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import type { Course, GeocodeResult } from "@/lib/courses";
-
-interface ApiResponse {
-  origin?: GeocodeResult;
-  courses?: Course[];
-  error?: string;
-}
+import {
+  findNearbyCourses,
+  geocodeLocation,
+  reverseGeocode,
+  LocationNotFoundError,
+  type Course,
+  type GeocodeResult,
+} from "@/lib/courses";
 
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
 
@@ -19,25 +20,22 @@ export default function Home() {
   const [origin, setOrigin] = useState<GeocodeResult | null>(null);
   const [courses, setCourses] = useState<Course[] | null>(null);
 
-  async function runSearch(params: URLSearchParams) {
+  async function runSearch(getOrigin: () => Promise<GeocodeResult>) {
     setLoading(true);
     setError(null);
     setCourses(null);
 
     try {
-      params.set("radius", String(radius));
-      const res = await fetch(`/api/courses?${params.toString()}`);
-      const data: ApiResponse = await res.json();
-
-      if (!res.ok) {
-        setError(data.error ?? "Something went wrong");
-        return;
+      const originResult = await getOrigin();
+      const courseResults = await findNearbyCourses(originResult, radius);
+      setOrigin(originResult);
+      setCourses(courseResults);
+    } catch (err) {
+      if (err instanceof LocationNotFoundError) {
+        setError(err.message);
+      } else {
+        setError("Failed to fetch nearby courses. Please try again.");
       }
-
-      setOrigin(data.origin ?? null);
-      setCourses(data.courses ?? []);
-    } catch {
-      setError("Could not reach the server. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -46,7 +44,7 @@ export default function Home() {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!location.trim()) return;
-    await runSearch(new URLSearchParams({ location }));
+    await runSearch(() => geocodeLocation(location));
   }
 
   function handleUseLocation() {
@@ -60,11 +58,8 @@ export default function Home() {
     navigator.geolocation.getCurrentPosition(
       async (position) => {
         setLocation("");
-        await runSearch(
-          new URLSearchParams({
-            lat: String(position.coords.latitude),
-            lon: String(position.coords.longitude),
-          })
+        await runSearch(() =>
+          reverseGeocode(position.coords.latitude, position.coords.longitude)
         );
       },
       () => {

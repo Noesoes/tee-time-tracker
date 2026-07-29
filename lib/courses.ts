@@ -21,7 +21,6 @@ const OVERPASS_URLS = [
   'https://overpass.kumi.systems/api/interpreter',
   'https://overpass.openstreetmap.ru/api/interpreter',
 ]
-const USER_AGENT = 'tee-time-tracker/0.1 (contact: noahfonoimoana@gmail.com)'
 const CACHE_TTL_MS = 5 * 60 * 1000
 
 const courseCache = new Map<string, { expiresAt: number; courses: Course[] }>()
@@ -34,9 +33,7 @@ export async function geocodeLocation(query: string): Promise<GeocodeResult> {
   url.searchParams.set('format', 'json')
   url.searchParams.set('limit', '1')
 
-  const res = await fetch(url, {
-    headers: { 'User-Agent': USER_AGENT },
-  })
+  const res = await fetch(url)
   if (!res.ok) {
     throw new Error(`Geocoding request failed with status ${res.status}`)
   }
@@ -64,9 +61,7 @@ export async function reverseGeocode(lat: number, lon: number): Promise<GeocodeR
   url.searchParams.set('lon', String(lon))
   url.searchParams.set('format', 'json')
 
-  const res = await fetch(url, {
-    headers: { 'User-Agent': USER_AGENT },
-  })
+  const res = await fetch(url)
   if (!res.ok) {
     throw new Error(`Reverse geocoding request failed with status ${res.status}`)
   }
@@ -136,7 +131,6 @@ export async function findNearbyCourses(
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': USER_AGENT,
       },
       body: `data=${encodeURIComponent(query)}`,
     })
