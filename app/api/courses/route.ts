@@ -1,21 +1,41 @@
 import { type NextRequest } from 'next/server'
-import { findNearbyCourses, geocodeLocation, LocationNotFoundError } from '@/lib/courses'
+import {
+  findNearbyCourses,
+  geocodeLocation,
+  reverseGeocode,
+  LocationNotFoundError,
+} from '@/lib/courses'
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams
   const location = searchParams.get('location')?.trim()
+  const latParam = searchParams.get('lat')
+  const lonParam = searchParams.get('lon')
   const radiusParam = searchParams.get('radius')
   const radiusMiles = radiusParam ? parseFloat(radiusParam) : 15
 
-  if (!location) {
-    return Response.json({ error: 'Missing "location" query parameter' }, { status: 400 })
-  }
   if (!Number.isFinite(radiusMiles) || radiusMiles <= 0 || radiusMiles > 100) {
     return Response.json({ error: 'Radius must be between 1 and 100 miles' }, { status: 400 })
   }
 
   try {
-    const origin = await geocodeLocation(location)
+    let origin
+    if (latParam && lonParam) {
+      const lat = parseFloat(latParam)
+      const lon = parseFloat(lonParam)
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        return Response.json({ error: 'Invalid lat/lon' }, { status: 400 })
+      }
+      origin = await reverseGeocode(lat, lon)
+    } else if (location) {
+      origin = await geocodeLocation(location)
+    } else {
+      return Response.json(
+        { error: 'Provide either "location" or "lat" and "lon" query parameters' },
+        { status: 400 }
+      )
+    }
+
     const courses = await findNearbyCourses(origin, radiusMiles)
     return Response.json({ origin, courses })
   } catch (err) {

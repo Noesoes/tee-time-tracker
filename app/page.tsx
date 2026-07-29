@@ -19,18 +19,14 @@ export default function Home() {
   const [origin, setOrigin] = useState<GeocodeResult | null>(null);
   const [courses, setCourses] = useState<Course[] | null>(null);
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    if (!location.trim()) return;
-
+  async function runSearch(params: URLSearchParams) {
     setLoading(true);
     setError(null);
     setCourses(null);
 
     try {
-      const res = await fetch(
-        `/api/courses?location=${encodeURIComponent(location)}&radius=${radius}`
-      );
+      params.set("radius", String(radius));
+      const res = await fetch(`/api/courses?${params.toString()}`);
       const data: ApiResponse = await res.json();
 
       if (!res.ok) {
@@ -45,6 +41,38 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!location.trim()) return;
+    await runSearch(new URLSearchParams({ location }));
+  }
+
+  function handleUseLocation() {
+    if (!navigator.geolocation) {
+      setError("Geolocation isn't supported by this browser.");
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        setLocation("");
+        await runSearch(
+          new URLSearchParams({
+            lat: String(position.coords.latitude),
+            lon: String(position.coords.longitude),
+          })
+        );
+      },
+      () => {
+        setLoading(false);
+        setError("Couldn't get your location. Check your browser's location permission.");
+      },
+      { timeout: 10000 }
+    );
   }
 
   return (
@@ -86,6 +114,15 @@ export default function Home() {
             {loading ? "Searching…" : "Search"}
           </button>
         </form>
+
+        <button
+          type="button"
+          onClick={handleUseLocation}
+          disabled={loading}
+          className="self-start text-sm font-medium text-zinc-600 underline underline-offset-2 hover:text-zinc-900 disabled:opacity-50 dark:text-zinc-400 dark:hover:text-zinc-50"
+        >
+          Use my current location
+        </button>
 
         {error && (
           <p className="rounded-md bg-red-50 px-4 py-3 text-red-700 dark:bg-red-950 dark:text-red-300">

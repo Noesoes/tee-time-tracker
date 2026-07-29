@@ -16,8 +16,15 @@ export interface GeocodeResult {
 }
 
 const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search'
-const OVERPASS_URL = 'https://overpass-api.de/api/interpreter'
+const OVERPASS_URLS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.openstreetmap.ru/api/interpreter',
+]
 const USER_AGENT = 'tee-time-tracker/0.1 (contact: noahfonoimoana@gmail.com)'
+const CACHE_TTL_MS = 5 * 60 * 1000
+
+const courseCache = new Map<string, { expiresAt: number; courses: Course[] }>()
 
 export class LocationNotFoundError extends Error {}
 
@@ -48,6 +55,28 @@ export async function geocodeLocation(query: string): Promise<GeocodeResult> {
     lat: parseFloat(results[0].lat),
     lon: parseFloat(results[0].lon),
     displayName: results[0].display_name,
+  }
+}
+
+export async function reverseGeocode(lat: number, lon: number): Promise<GeocodeResult> {
+  const url = new URL('https://nominatim.openstreetmap.org/reverse')
+  url.searchParams.set('lat', String(lat))
+  url.searchParams.set('lon', String(lon))
+  url.searchParams.set('format', 'json')
+
+  const res = await fetch(url, {
+    headers: { 'User-Agent': USER_AGENT },
+  })
+  if (!res.ok) {
+    throw new Error(`Reverse geocoding request failed with status ${res.status}`)
+  }
+
+  const result = (await res.json()) as { display_name?: string; error?: string }
+
+  return {
+    lat,
+    lon,
+    displayName: result.display_name ?? 'your location',
   }
 }
 
@@ -91,23 +120,36 @@ export async function findNearbyCourses(
   origin: GeocodeResult,
   radiusMiles: number
 ): Promise<Course[]> {
+  const cacheKey = `${origin.lat.toFixed(3)},${origin.lon.toFixed(3)},${radiusMiles}`
+  const cached = courseCache.get(cacheKey)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.courses
+  }
+
   const radiusMeters = Math.round(radiusMiles * 1609.34)
   const query = `[out:json][timeout:25];nwr["leisure"="golf_course"](around:${radiusMeters},${origin.lat},${origin.lon});out center tags;`
 
-  const res = await fetch(OVERPASS_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'User-Agent': USER_AGENT,
-    },
-    body: `data=${encodeURIComponent(query)}`,
-  })
-
-  if (!res.ok) {
-    throw new Error(`Overpass request failed with status ${res.status}`)
+  let data: { elements: OverpassElement[] } | null = null
+  let lastStatus = 0
+  for (const url of OVERPASS_URLS) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': USER_AGENT,
+      },
+      body: `data=${encodeURIComponent(query)}`,
+    })
+    if (res.ok) {
+      data = (await res.json()) as { elements: OverpassElement[] }
+      break
+    }
+    lastStatus = res.status
   }
 
-  const data = (await res.json()) as { elements: OverpassElement[] }
+  if (!data) {
+    throw new Error(`Overpass request failed with status ${lastStatus}`)
+  }
 
   const courses: Course[] = data.elements
     .filter((el) => el.tags?.name)
@@ -135,6 +177,8 @@ export async function findNearbyCourses(
     })
     .filter((c): c is Course => c !== null)
     .sort((a, b) => a.distanceMiles - b.distanceMiles)
+
+  courseCache.set(cacheKey, { expiresAt: Date.now() + CACHE_TTL_MS, courses })
 
   return courses
 }
