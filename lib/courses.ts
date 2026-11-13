@@ -6,8 +6,14 @@ export interface Course {
   distanceMiles: number
   address: string | null
   website: string | null
+  phone: string | null
+  access: CourseAccess
+  holes: number | null
   searchUrl: string
+  directionsUrl: string
 }
+
+export type CourseAccess = 'public' | 'private' | 'unknown'
 
 export interface GeocodeResult {
   lat: number
@@ -106,6 +112,35 @@ function buildAddress(tags: Record<string, string>): string | null {
   return parts.length > 0 ? parts.join(', ') : null
 }
 
+function normalizeWebsite(raw: string | undefined): string | null {
+  if (!raw) return null
+  const value = raw.split(';')[0].trim()
+  if (!value) return null
+  const withScheme = /^https?:\/\//i.test(value) ? value : `https://${value}`
+  try {
+    const url = new URL(withScheme)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null
+  } catch {
+    return null
+  }
+}
+
+function parseAccess(tags: Record<string, string>): CourseAccess {
+  const access = (tags.access ?? tags['golf:access'] ?? '').toLowerCase()
+  if (['private', 'members', 'no', 'customers'].includes(access)) return 'private'
+  if (['yes', 'public', 'permissive'].includes(access)) return 'public'
+  if (tags.fee === 'yes') return 'public'
+  return 'unknown'
+}
+
+function parseHoles(tags: Record<string, string>): number | null {
+  const raw = tags.holes ?? tags['golf:course'] ?? tags['golf:holes'] ?? ''
+  const match = raw.match(/\d+/)
+  if (!match) return null
+  const holes = parseInt(match[0], 10)
+  return holes > 0 && holes <= 72 ? holes : null
+}
+
 function buildSearchUrl(name: string, address: string | null): string {
   const query = [name, address, 'tee times'].filter(Boolean).join(' ')
   return `https://www.google.com/search?q=${encodeURIComponent(query)}`
@@ -127,18 +162,22 @@ export async function findNearbyCourses(
   let data: { elements: OverpassElement[] } | null = null
   let lastStatus = 0
   for (const url of OVERPASS_URLS) {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: `data=${encodeURIComponent(query)}`,
-    })
-    if (res.ok) {
-      data = (await res.json()) as { elements: OverpassElement[] }
-      break
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: `data=${encodeURIComponent(query)}`,
+      })
+      if (res.ok) {
+        data = (await res.json()) as { elements: OverpassElement[] }
+        break
+      }
+      lastStatus = res.status
+    } catch {
+      // Network error or mirror down — fall through to the next mirror.
     }
-    lastStatus = res.status
   }
 
   if (!data) {
@@ -155,7 +194,8 @@ export async function findNearbyCourses(
       const tags = el.tags ?? {}
       const name = tags.name!
       const address = buildAddress(tags)
-      const website = tags.website ?? tags['contact:website'] ?? null
+      const website = normalizeWebsite(tags.website ?? tags['contact:website'])
+      const phone = (tags.phone ?? tags['contact:phone'] ?? '').split(';')[0].trim() || null
 
       const course: Course = {
         id: `${el.type}/${el.id}`,
@@ -165,7 +205,11 @@ export async function findNearbyCourses(
         distanceMiles: haversineMiles(origin.lat, origin.lon, lat, lon),
         address,
         website,
+        phone,
+        access: parseAccess(tags),
+        holes: parseHoles(tags),
         searchUrl: buildSearchUrl(name, address),
+        directionsUrl: `https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}`,
       }
       return course
     })

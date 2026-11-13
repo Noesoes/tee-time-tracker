@@ -11,11 +11,14 @@ no server or backend required.
    [Overpass API](https://overpass-api.de/) for `leisure=golf_course` points
    within the chosen radius. Both are called directly from the browser (they
    support CORS), so there's no API route or server involved.
-2. `app/page.tsx` is the search UI: enter a location (or use your current
-   location), pick a radius, and get a distance-sorted list of nearby
-   courses. Each result links to the course's website when OpenStreetMap has
-   one on file, or falls back to a Google search for the course's booking
-   page.
+2. `app/page.tsx` is the search UI: enter a location, use your current
+   location, or drop a pin on the map, then set the radius with the slider
+   (1–50 mi). Results are a distance-sorted list of course cards alongside a
+   map (`components/CourseMap.tsx`, Leaflet + OpenStreetMap tiles) showing
+   the search circle and a numbered marker per course. Each card links to
+   the course's website when OpenStreetMap has one on file, or falls back to
+   a Google search for the course's booking page, plus driving directions.
+   The current search is kept in the URL, so links are shareable.
 
 This is a directory/link-out tool, not a live tee-time availability
 aggregator — actual bookable time slots live behind several competing
