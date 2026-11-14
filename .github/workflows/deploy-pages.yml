@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - claude/tee-times-website-feasibility-ovnecs
+      - claude/sharp-ptolemy-672104
   workflow_dispatch:
 
 permissions:
