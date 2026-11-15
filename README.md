@@ -19,6 +19,13 @@ no server or backend required.
    the course's website when OpenStreetMap has one on file, or falls back to
    a Google search for the course's booking page, plus driving directions.
    The current search is kept in the URL, so links are shareable.
+3. **When** filter: pick days (next 7) and time windows (early, morning,
+   afternoon, twilight-until-sunset). `lib/schedule.ts` turns those into time
+   slots, clipped to local daylight; `lib/hours.ts` (lazy-loaded, it bundles
+   the `opening_hours` parser) checks each course's OpenStreetMap
+   `opening_hours` against them. Courses closed then are hidden, courses with
+   no posted hours are kept and labelled, and a single chosen day is carried
+   into the "Search tee times" link.
 
 This is a directory/link-out tool, not a live tee-time availability
 aggregator — actual bookable time slots live behind several competing

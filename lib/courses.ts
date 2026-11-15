@@ -7,6 +7,7 @@ export interface Course {
   address: string | null
   website: string | null
   phone: string | null
+  openingHours: string | null
   access: CourseAccess
   holes: number | null
   searchUrl: string
@@ -297,6 +298,7 @@ export async function findNearbyCourses(
         address,
         website,
         phone,
+        openingHours: tags.opening_hours?.trim() || null,
         access: parseAccess(tags),
         holes: parseHoles(tags),
         searchUrl: buildSearchUrl(name, address),
