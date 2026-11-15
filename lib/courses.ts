@@ -24,9 +24,16 @@ export interface GeocodeResult {
 const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search'
 const OVERPASS_URLS = [
   'https://overpass-api.de/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass.openstreetmap.ru/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
 ]
+// Each mirror gets this long before we give up on it.
+const OVERPASS_TIMEOUT_MS = 9_000
+// Give up on Overpass entirely (and fall back to Nominatim) after this long.
+const OVERPASS_DEADLINE_MS = 9_000
+// Start the next mirror if the previous one hasn't answered within this window.
+const OVERPASS_STAGGER_MS = 1_500
 const CACHE_TTL_MS = 5 * 60 * 1000
 
 const courseCache = new Map<string, { expiresAt: number; courses: Course[] }>()
@@ -146,6 +153,114 @@ function buildSearchUrl(name: string, address: string | null): string {
   return `https://www.google.com/search?q=${encodeURIComponent(query)}`
 }
 
+interface BBox {
+  south: number
+  west: number
+  north: number
+  east: number
+}
+
+function boundingBox(lat: number, lon: number, radiusMiles: number): BBox {
+  const dLat = radiusMiles / 69.0
+  const dLon = radiusMiles / (69.0 * Math.max(Math.cos((lat * Math.PI) / 180), 0.01))
+  return { south: lat - dLat, west: lon - dLon, north: lat + dLat, east: lon + dLon }
+}
+
+function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, outer: AbortSignal): Promise<Response> {
+  const controller = new AbortController()
+  const onOuterAbort = () => controller.abort()
+  outer.addEventListener('abort', onOuterAbort)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  return fetch(url, { ...init, signal: controller.signal }).finally(() => {
+    clearTimeout(timer)
+    outer.removeEventListener('abort', onOuterAbort)
+  })
+}
+
+/**
+ * Query the Overpass mirrors, staggered so a slow or overloaded mirror can't
+ * stall the search: the first one to answer wins and the rest are cancelled.
+ */
+async function fetchOverpass(box: BBox): Promise<OverpassElement[]> {
+  const query = `[out:json][timeout:20];nwr["leisure"="golf_course"](${box.south},${box.west},${box.north},${box.east});out center tags qt;`
+  const body = `data=${encodeURIComponent(query)}`
+  const done = new AbortController()
+
+  const attempts = OVERPASS_URLS.map(async (url, i) => {
+    if (i > 0) {
+      await new Promise((resolve) => setTimeout(resolve, i * OVERPASS_STAGGER_MS))
+      if (done.signal.aborted) throw new Error('cancelled')
+    }
+    const res = await fetchWithTimeout(
+      url,
+      { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body },
+      OVERPASS_TIMEOUT_MS,
+      done.signal
+    )
+    if (!res.ok) throw new Error(`Overpass ${url} returned ${res.status}`)
+    const json = (await res.json()) as { elements?: OverpassElement[]; remark?: string }
+    // Overpass reports server-side timeouts as a 200 with a remark and no data.
+    if (!json.elements || (json.elements.length === 0 && json.remark)) {
+      throw new Error(`Overpass ${url}: ${json.remark ?? 'no data'}`)
+    }
+    return json.elements
+  })
+
+  const deadline = setTimeout(() => done.abort(), OVERPASS_DEADLINE_MS)
+  try {
+    return await Promise.any(attempts)
+  } finally {
+    clearTimeout(deadline)
+    done.abort()
+  }
+}
+
+/** Fallback when every Overpass mirror is down: Nominatim's POI search. */
+async function fetchNominatimCourses(box: BBox): Promise<OverpassElement[]> {
+  const url = new URL(NOMINATIM_URL)
+  url.searchParams.set('q', 'golf course')
+  url.searchParams.set('format', 'jsonv2')
+  url.searchParams.set('viewbox', `${box.west},${box.north},${box.east},${box.south}`)
+  url.searchParams.set('bounded', '1')
+  url.searchParams.set('limit', '40')
+  url.searchParams.set('extratags', '1')
+  url.searchParams.set('addressdetails', '1')
+
+  const res = await fetchWithTimeout(url.href, {}, 15_000, new AbortController().signal)
+  if (!res.ok) throw new Error(`Nominatim course search failed with status ${res.status}`)
+  const results = (await res.json()) as Array<{
+    osm_type: 'node' | 'way' | 'relation'
+    osm_id: number
+    lat: string
+    lon: string
+    name?: string
+    category?: string
+    type?: string
+    extratags?: Record<string, string>
+    address?: Record<string, string>
+  }>
+
+  return results
+    .filter((r) => r.name && (r.type === 'golf_course' || /golf/i.test(r.name)))
+    .map((r) => ({
+      type: r.osm_type,
+      id: r.osm_id,
+      lat: parseFloat(r.lat),
+      lon: parseFloat(r.lon),
+      tags: {
+        name: r.name!,
+        ...(r.extratags ?? {}),
+        ...(r.address?.road ? { 'addr:street': r.address.road } : {}),
+        ...(r.address?.house_number ? { 'addr:housenumber': r.address.house_number } : {}),
+        ...(r.address?.city || r.address?.town || r.address?.village
+          ? { 'addr:city': (r.address.city ?? r.address.town ?? r.address.village)! }
+          : {}),
+        ...(r.address?.state ? { 'addr:state': r.address.state } : {}),
+        ...(r.address?.postcode ? { 'addr:postcode': r.address.postcode } : {}),
+      },
+    }))
+}
+
 export async function findNearbyCourses(
   origin: GeocodeResult,
   radiusMiles: number
@@ -156,33 +271,9 @@ export async function findNearbyCourses(
     return cached.courses
   }
 
-  const radiusMeters = Math.round(radiusMiles * 1609.34)
-  const query = `[out:json][timeout:25];nwr["leisure"="golf_course"](around:${radiusMeters},${origin.lat},${origin.lon});out center tags;`
-
-  let data: { elements: OverpassElement[] } | null = null
-  let lastStatus = 0
-  for (const url of OVERPASS_URLS) {
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: `data=${encodeURIComponent(query)}`,
-      })
-      if (res.ok) {
-        data = (await res.json()) as { elements: OverpassElement[] }
-        break
-      }
-      lastStatus = res.status
-    } catch {
-      // Network error or mirror down — fall through to the next mirror.
-    }
-  }
-
-  if (!data) {
-    throw new Error(`Overpass request failed with status ${lastStatus}`)
-  }
+  const box = boundingBox(origin.lat, origin.lon, radiusMiles)
+  const elements = await fetchOverpass(box).catch(() => fetchNominatimCourses(box))
+  const data = { elements }
 
   const courses: Course[] = data.elements
     .filter((el) => el.tags?.name)
@@ -213,7 +304,8 @@ export async function findNearbyCourses(
       }
       return course
     })
-    .filter((c): c is Course => c !== null)
+    .filter((c): c is Course => c !== null && c.distanceMiles <= radiusMiles)
+    .filter((c, i, all) => all.findIndex((o) => o.name === c.name && Math.abs(o.distanceMiles - c.distanceMiles) < 0.5) === i)
     .sort((a, b) => a.distanceMiles - b.distanceMiles)
 
   courseCache.set(cacheKey, { expiresAt: Date.now() + CACHE_TTL_MS, courses })
